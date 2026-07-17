@@ -52,7 +52,7 @@ process NEXTCLADE {
   output:
   path "nextclade/*.csv", emit: nextclade_file
   path "nextclade/*", emit: results
-  tuple file("nextclade/nextclade.aligned.fasta"), file("nextclade/nextclade.nwk"), emit: prealigned, optional: true
+  tuple file("nextclade/nextclade_*.aligned.fasta"), file("nextclade/nextclade_*.nwk"), emit: prealigned, optional: true
   path "logs/${task.process}/*.log", emit: log
   path "versions.yml", emit: versions
 
@@ -86,10 +86,23 @@ process NEXTCLADE {
 
     cp ultimate_fasta.fasta nextclade/${prefix}.fasta
 
-    # Rename output files to include dataset name for clarity
+    # Rename aligned FASTA and NWK files to include dataset name
+    # This prevents overwrites when running multiple datasets in parallel
+    # and ensures each prealigned output is uniquely identifiable
+    if [ -f "nextclade/nextclade.aligned.fasta" ]; then
+      mv nextclade/nextclade.aligned.fasta nextclade/nextclade_${sanitized_dataset}.aligned.fasta
+    fi
+
+    if [ -f "nextclade/nextclade.nwk" ]; then
+      mv nextclade/nextclade.nwk nextclade/nextclade_${sanitized_dataset}.nwk
+    fi
+
+    # Rename other output files to include dataset name
     for file in nextclade/*; do
-      if [ "\$(basename \"\$file\")" != "${prefix}.fasta" ]; then
-        mv "\$file" "nextclade/${prefix}_\$(basename \"\$file\")"
+      basename=\$(basename "\$file")
+      # Skip files that already have dataset in the name or are our input fasta
+      if [[ ! "\$basename" =~ ${sanitized_dataset} ]] && [[ "\$basename" != "${prefix}.fasta" ]]; then
+        mv "\$file" "nextclade/${sanitized_dataset}_\${basename}"
       fi
     done
 
