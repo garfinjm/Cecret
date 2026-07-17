@@ -3,7 +3,7 @@ include { FREYJA_AGGREGATE              } from '../../../modules/local/freyja'
 include { FREYJA_PATHOGEN               } from '../../../modules/local/freyja'
 include { FREYJA_UPDATE                 } from '../../../modules/local/freyja'
 include { NEXTCLADE                     } from '../../../modules/local/nextclade'
-include { NEXTCLADE_DATASET as DATASET  } from '../../../modules/local/nextclade'
+include { NEXTCLADE_DATASET             } from '../../../modules/local/nextclade'
 include { UNZIP                         } from '../../../modules/local/local' 
 include { VADR                          } from '../../../modules/local/vadr'
 
@@ -26,9 +26,9 @@ Relevant params and their values:
 
 - 'params.species' : ${params.species}
     - Designates subworkflows
-- 'params.nextclade_dataset': ${params.nextclade_dataset}
-    - Designate which dataset to download in NEXTCLADE_DATASET.
-    - will be ignored if value is set to 'sars-cov-2'.
+- 'params.nextclade_datasets': ${params.nextclade_datasets}
+    - Comma-separated list of datasets to download and run Nextclade against
+    - When multiple datasets are specified, sequences will be classified by each dataset in parallel
     - See Nextclade documentation at 
       https://docs.nextstrain.org/projects/nextclade/en/stable/user/datasets.html to see 
       available datasets.
@@ -43,23 +43,23 @@ Relevant params and their values:
     - Will be ignored if value is equal to 'sarscov2'.
     - See available images at https://hub.docker.com/r/staphb/vadr/tags.
 - 'params.download_nextclade_dataset' : ${params.download_nextclade_dataset}
-    - Will used nextclade to download the dataset according to 'params.nextclade_dataset' 
+    - Will download the datasets according to 'params.nextclade_datasets' 
       in NEXTCLADE_DATASET.
 - 'params.predownloaded_nextclade_dataset' : ${params.predownloaded_nextclade_dataset}
     - Allows the user to use an existing nextclade dataset in a zipped directory.
     - See https://github.com/UPHL-BioNGS/Cecret/wiki/Usage#nextclade-datasets for more 
       information.
 
-┏━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┏━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
 ┃ process            ┃ description                                                       ┃
-┣━━━━━━━━━━━━━━━━━━━━╋━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫
+┣━━━━━━━━━━━━━━━━━━━━╋━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫
 ┃ VADR               ┃ Validates viral sequences and annotates expected features/errors. ┃
 ┃ NEXTCLADE_DATASET  ┃ Downloads the requested Nextclade dataset for the target pathogen.┃
 ┃ NEXTCLADE          ┃ Performs clade assignment, mutation calling, and QC.              ┃
 ┃ FREYJA_UPDATE      ┃ Updates the Freyja database for the specified pathogen.           ┃
 ┃ FREYJA             ┃ Estimates lineage abundances from BAM files (e.g., wastewater).   ┃
 ┃ FREYJA_AGGREGATE   ┃ Aggregates Freyja abundance outputs across multiple samples.      ┃
-┗━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+┗━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
 """
 
@@ -99,21 +99,37 @@ Relevant params and their values:
     }
   }
 
-  // run nextclade only if nextclade is expected to run
-  if (( params.nextclade_dataset && params.nextclade_dataset != 'sars-cov-2' && params.download_nextclade_dataset?.toString()?.toBoolean() ) || params.predownloaded_nextclade_dataset ) {
-
-    // running nextclade
-    if ( params.download_nextclade_dataset?.toString()?.toBoolean() && !params.predownloaded_nextclade_dataset ) {
-      DATASET()
-      ch_dataset  = DATASET.out.dataset
-      ch_versions = ch_versions.mix(DATASET.out.versions)
-    } else {
-      UNZIP(ch_input_dataset)
-      ch_dataset  = UNZIP.out.dataset
-      ch_versions = ch_versions.mix(UNZIP.out.versions)
-    }
+  // run nextclade with multiple datasets using flattened channel approach
+  if (params.nextclade && params.download_nextclade_dataset?.toString()?.toBoolean()) {
     
-    NEXTCLADE(ch_fastas.collect(), ch_dataset)
+    // Parse comma-separated dataset list
+    def datasets = params.nextclade_datasets.split(',').collect { it.trim() }
+    
+    // Create channel from dataset names and download each one
+    ch_dataset_names = Channel.fromList(datasets)
+    
+    NEXTCLADE_DATASET(ch_dataset_names)
+    
+    // Combine fastas with each dataset
+    ch_fasta_and_dataset = ch_fastas.combine(NEXTCLADE_DATASET.out.dataset_name).combine(NEXTCLADE_DATASET.out.dataset)
+    
+    // Run NEXTCLADE for each dataset in parallel
+    NEXTCLADE(ch_fasta_and_dataset.map { fasta, dataset_name, dataset -> fasta }, 
+              ch_fasta_and_dataset.map { fasta, dataset_name, dataset -> dataset_name },
+              ch_fasta_and_dataset.map { fasta, dataset_name, dataset -> dataset })
+    
+    ch_versions    = ch_versions.mix(NEXTCLADE_DATASET.out.versions)
+    ch_versions    = ch_versions.mix(NEXTCLADE.out.versions)
+    ch_for_multiqc = ch_for_multiqc.mix(NEXTCLADE.out.nextclade_file)
+    ch_for_summary = ch_for_summary.mix(NEXTCLADE.out.nextclade_file)
+    
+  } else if (params.nextclade && params.predownloaded_nextclade_dataset) {
+    // Fallback to predownloaded dataset (original behavior)
+    UNZIP(ch_input_dataset)
+    ch_dataset  = UNZIP.out.dataset
+    ch_versions = ch_versions.mix(UNZIP.out.versions)
+    
+    NEXTCLADE(ch_fastas.collect(), Channel.value('predownloaded'), ch_dataset)
     ch_versions    = ch_versions.mix(NEXTCLADE.out.versions)
     ch_for_multiqc = ch_for_multiqc.mix(NEXTCLADE.out.nextclade_file)
     ch_for_summary = ch_for_summary.mix(NEXTCLADE.out.nextclade_file)
